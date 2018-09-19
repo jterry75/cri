@@ -29,11 +29,9 @@ import (
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/leases"
 	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/containerd/plugin"
 	"github.com/containerd/containerd/services"
 	"github.com/containerd/containerd/snapshots"
-	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 
@@ -58,7 +56,7 @@ func init() {
 }
 
 func initCRIService(ic *plugin.InitContext) (interface{}, error) {
-	ic.Meta.Platforms = []imagespec.Platform{platforms.DefaultSpec()}
+	ic.Meta.Platforms = getPlatforms()
 	ic.Meta.Exports = map[string]string{"CRIVersion": constants.CRIVersion}
 	ctx := ic.Context
 	pluginConfig := ic.Config.(*criconfig.PluginConfig)

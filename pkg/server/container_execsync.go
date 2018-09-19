@@ -27,7 +27,6 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
-	"golang.org/x/sys/unix"
 	"k8s.io/client-go/tools/remotecommand"
 	runtime "k8s.io/kubernetes/pkg/kubelet/apis/cri/runtime/v1alpha2"
 
@@ -101,7 +100,9 @@ func (c *criService) execInContainer(ctx context.Context, id string, opts execOp
 	}
 	if opts.tty {
 		g := newSpecGenerator(spec)
-		g.AddProcessEnv("TERM", "xterm")
+		if spec.Linux != nil {
+			g.AddProcessEnv("TERM", "xterm")
+		}
 		spec = g.Config
 	}
 	pspec := spec.Process
@@ -172,7 +173,7 @@ func (c *criService) execInContainer(ctx context.Context, id string, opts execOp
 	case <-timeoutCh:
 		//TODO(Abhi) Use context.WithDeadline instead of timeout.
 		// Ignore the not found error because the process may exit itself before killing.
-		if err := process.Kill(ctx, unix.SIGKILL); err != nil && !errdefs.IsNotFound(err) {
+		if err := process.Kill(ctx, SysKillSignal); err != nil && !errdefs.IsNotFound(err) {
 			return nil, errors.Wrapf(err, "failed to kill exec %q", execID)
 		}
 		// Wait for the process to be killed.

@@ -17,16 +17,13 @@ limitations under the License.
 package server
 
 import (
-	"os"
 	"time"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/errdefs"
-	cni "github.com/containerd/go-cni"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
-	"golang.org/x/sys/unix"
 	runtime "k8s.io/kubernetes/pkg/kubelet/apis/cri/runtime/v1alpha2"
 
 	sandboxstore "github.com/containerd/cri/pkg/store/sandbox"
@@ -59,31 +56,8 @@ func (c *criService) StopPodSandbox(ctx context.Context, r *runtime.StopPodSandb
 		}
 	}
 
-	// Teardown network for sandbox.
-	if sandbox.NetNSPath != "" && sandbox.NetNS != nil {
-		if _, err := os.Stat(sandbox.NetNSPath); err != nil {
-			if !os.IsNotExist(err) {
-				return nil, errors.Wrapf(err, "failed to stat network namespace path %s", sandbox.NetNSPath)
-			}
-		} else {
-			if teardownErr := c.teardownPod(id, sandbox.NetNSPath, sandbox.Config); teardownErr != nil {
-				return nil, errors.Wrapf(teardownErr, "failed to destroy network for sandbox %q", id)
-			}
-		}
-		/*TODO:It is still possible that containerd crashes after we teardown the network, but before we remove the network namespace.
-		In that case, we'll not be able to remove the sandbox anymore. The chance is slim, but we should be aware of that.
-		In the future, once TearDownPod is idempotent, this will be fixed.*/
-
-		//Close the sandbox network namespace if it was created
-		if err = sandbox.NetNS.Remove(); err != nil {
-			return nil, errors.Wrapf(err, "failed to remove network namespace for sandbox %q", id)
-		}
-	}
-
-	logrus.Infof("TearDown network for sandbox %q successfully", id)
-
-	if err := c.unmountSandboxFiles(id, sandbox.Config); err != nil {
-		return nil, errors.Wrap(err, "failed to unmount sandbox files")
+	if err := c.doStopPodSandbox(id, sandbox); err != nil {
+		return nil, err
 	}
 
 	// Only stop sandbox container when it's running.
@@ -109,7 +83,7 @@ func (c *criService) stopSandboxContainer(ctx context.Context, sandbox sandboxst
 	}
 
 	// Kill the sandbox container.
-	if err = task.Kill(ctx, unix.SIGKILL, containerd.WithKillAll); err != nil && !errdefs.IsNotFound(err) {
+	if err = task.Kill(ctx, SysKillSignal, containerd.WithKillAll); err != nil && !errdefs.IsNotFound(err) {
 		return errors.Wrap(err, "failed to kill sandbox container")
 	}
 
@@ -119,7 +93,7 @@ func (c *criService) stopSandboxContainer(ctx context.Context, sandbox sandboxst
 	logrus.WithError(err).Errorf("An error occurs during waiting for sandbox %q to be killed", sandbox.ID)
 
 	// Kill the sandbox container init process.
-	if err = task.Kill(ctx, unix.SIGKILL); err != nil && !errdefs.IsNotFound(err) {
+	if err = task.Kill(ctx, SysKillSignal); err != nil && !errdefs.IsNotFound(err) {
 		return errors.Wrap(err, "failed to kill sandbox container init process")
 	}
 
@@ -138,17 +112,4 @@ func (c *criService) waitSandboxStop(ctx context.Context, sandbox sandboxstore.S
 	case <-sandbox.Stopped():
 		return nil
 	}
-}
-
-// teardownPod removes the network from the pod
-func (c *criService) teardownPod(id string, path string, config *runtime.PodSandboxConfig) error {
-	if c.netPlugin == nil {
-		return errors.New("cni config not intialized")
-	}
-
-	labels := getPodCNILabels(id, config)
-	return c.netPlugin.Remove(id,
-		path,
-		cni.WithLabels(labels),
-		cni.WithCapabilityPortMap(toCNIPortMappings(config.GetPortMappings())))
 }

@@ -100,7 +100,7 @@ func (c *criService) PullImage(ctx context.Context, r *runtime.PullImageRequest)
 	image, err := c.client.Pull(ctx, ref,
 		containerd.WithSchema1Conversion,
 		containerd.WithResolver(resolver),
-		containerd.WithPullSnapshotter(c.config.ContainerdConfig.Snapshotter),
+		containerd.WithPullSnapshotter(c.getDefaultSnapshotterForSandbox(r.GetSandboxConfig())),
 		containerd.WithPullUnpack,
 	)
 	if err != nil {

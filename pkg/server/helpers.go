@@ -21,19 +21,13 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 
-	"github.com/containerd/containerd/containers"
-	"github.com/containerd/containerd/runtime/linux/runctypes"
-	"github.com/containerd/typeurl"
 	"github.com/docker/distribution/reference"
 	imagedigest "github.com/opencontainers/go-digest"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
-	"github.com/opencontainers/selinux/go-selinux"
-	"github.com/opencontainers/selinux/go-selinux/label"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 	runtime "k8s.io/kubernetes/pkg/kubelet/apis/cri/runtime/v1alpha2"
@@ -116,16 +110,17 @@ const (
 	defaultIfName = "eth0"
 	// networkAttachCount is the minimum number of networks the PodSandbox
 	// attaches to
-	networkAttachCount = 2
+	networkAttachCount        = 2
+	windowsNetworkAttachCount = 1
 )
 
 // makeSandboxName generates sandbox name from sandbox metadata. The name
 // generated is unique as long as sandbox metadata is unique.
 func makeSandboxName(s *runtime.PodSandboxMetadata) string {
 	return strings.Join([]string{
-		s.Name,      // 0
-		s.Namespace, // 1
-		s.Uid,       // 2
+		s.Name,                       // 0
+		s.Namespace,                  // 1
+		s.Uid,                        // 2
 		fmt.Sprintf("%d", s.Attempt), // 3
 	}, nameDelimiter)
 }
@@ -135,10 +130,10 @@ func makeSandboxName(s *runtime.PodSandboxMetadata) string {
 // unique.
 func makeContainerName(c *runtime.ContainerMetadata, s *runtime.PodSandboxMetadata) string {
 	return strings.Join([]string{
-		c.Name,      // 0
-		s.Name,      // 1: pod name
-		s.Namespace, // 2: pod namespace
-		s.Uid,       // 3: pod uid
+		c.Name,                       // 0
+		s.Name,                       // 1: pod name
+		s.Namespace,                  // 2: pod namespace
+		s.Uid,                        // 3: pod uid
 		fmt.Sprintf("%d", c.Attempt), // 4
 	}, nameDelimiter)
 }
@@ -284,7 +279,7 @@ func getUserFromImage(user string) (*int64, string) {
 
 // ensureImageExists returns corresponding metadata of the image reference, if image is not
 // pulled yet, the function will pull the image.
-func (c *criService) ensureImageExists(ctx context.Context, ref string) (*imagestore.Image, error) {
+func (c *criService) ensureImageExists(ctx context.Context, ref string, sandbox *runtime.PodSandboxConfig) (*imagestore.Image, error) {
 	image, err := c.localResolve(ref)
 	if err != nil && err != store.ErrNotExist {
 		return nil, errors.Wrapf(err, "failed to get image %q", ref)
@@ -293,7 +288,7 @@ func (c *criService) ensureImageExists(ctx context.Context, ref string) (*images
 		return &image, nil
 	}
 	// Pull image to ensure the image exists
-	resp, err := c.PullImage(ctx, &runtime.PullImageRequest{Image: &runtime.ImageSpec{Image: ref}})
+	resp, err := c.PullImage(ctx, &runtime.PullImageRequest{Image: &runtime.ImageSpec{Image: ref}, SandboxConfig: sandbox})
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to pull image %q", ref)
 	}
@@ -304,44 +299,6 @@ func (c *criService) ensureImageExists(ctx context.Context, ref string) (*images
 		return nil, errors.Wrapf(err, "failed to get image %q after pulling", imageID)
 	}
 	return &newImage, nil
-}
-
-func initSelinuxOpts(selinuxOpt *runtime.SELinuxOption) (string, string, error) {
-	if selinuxOpt == nil {
-		return "", "", nil
-	}
-
-	// Should ignored selinuxOpts if they are incomplete.
-	if selinuxOpt.GetUser() == "" ||
-		selinuxOpt.GetRole() == "" ||
-		selinuxOpt.GetType() == "" {
-		return "", "", nil
-	}
-
-	// make sure the format of "level" is correct.
-	ok, err := checkSelinuxLevel(selinuxOpt.GetLevel())
-	if err != nil || !ok {
-		return "", "", err
-	}
-
-	labelOpts := fmt.Sprintf("%s:%s:%s:%s",
-		selinuxOpt.GetUser(),
-		selinuxOpt.GetRole(),
-		selinuxOpt.GetType(),
-		selinuxOpt.GetLevel())
-	return label.InitLabels(selinux.DupSecOpt(labelOpts))
-}
-
-func checkSelinuxLevel(level string) (bool, error) {
-	if len(level) == 0 {
-		return true, nil
-	}
-
-	matched, err := regexp.MatchString(`^s\d(-s\d)??(:c\d{1,4}((.c\d{1,4})?,c\d{1,4})*(.c\d{1,4})?(,c\d{1,4}(.c\d{1,4})?)*)?$`, level)
-	if err != nil || !matched {
-		return false, fmt.Errorf("the format of 'level' %q is not correct: %v", level, err)
-	}
-	return true, nil
 }
 
 // isInCRIMounts checks whether a destination is in CRI mount list.
@@ -384,26 +341,6 @@ func getPodCNILabels(id string, config *runtime.PodSandboxConfig) map[string]str
 		"K8S_POD_INFRA_CONTAINER_ID": id,
 		"IgnoreUnknown":              "1",
 	}
-}
-
-// getRuntimeConfigFromContainerInfo gets runtime configuration from containerd
-// container info.
-func getRuntimeConfigFromContainerInfo(c containers.Container) (criconfig.Runtime, error) {
-	r := criconfig.Runtime{
-		Type: c.Runtime.Name,
-	}
-	if c.Runtime.Options == nil {
-		// CRI plugin makes sure that runtime option is always set.
-		return criconfig.Runtime{}, errors.New("runtime options is nil")
-	}
-	data, err := typeurl.UnmarshalAny(c.Runtime.Options)
-	if err != nil {
-		return criconfig.Runtime{}, errors.Wrap(err, "failed to unmarshal runtime options")
-	}
-	runtimeOpts := data.(*runctypes.RuncOptions)
-	r.Engine = runtimeOpts.Runtime
-	r.Root = runtimeOpts.RuntimeRoot
-	return r, nil
 }
 
 // toRuntimeAuthConfig converts cri plugin auth config to runtime auth config.

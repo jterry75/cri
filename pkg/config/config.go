@@ -16,8 +16,6 @@ limitations under the License.
 
 package config
 
-import "github.com/containerd/containerd"
-
 // Runtime struct to contain the type(ID), engine, and root variables for a default runtime
 // and a runtime for untrusted worload.
 type Runtime struct {
@@ -151,45 +149,6 @@ type Config struct {
 	RootDir string `json:"rootDir"`
 	// StateDir is the root directory path for managing volatile pod/container data
 	StateDir string `json:"stateDir"`
-}
-
-// DefaultConfig returns default configurations of cri plugin.
-func DefaultConfig() PluginConfig {
-	return PluginConfig{
-		CniConfig: CniConfig{
-			NetworkPluginBinDir:       "/opt/cni/bin",
-			NetworkPluginConfDir:      "/etc/cni/net.d",
-			NetworkPluginConfTemplate: "",
-		},
-		ContainerdConfig: ContainerdConfig{
-			Snapshotter: containerd.DefaultSnapshotter,
-			DefaultRuntime: Runtime{
-				Type:   "io.containerd.runtime.v1.linux",
-				Engine: "",
-				Root:   "",
-			},
-			NoPivot: false,
-		},
-		StreamServerAddress: "127.0.0.1",
-		StreamServerPort:    "0",
-		EnableSelinux:       false,
-		EnableTLSStreaming:  false,
-		X509KeyPairStreaming: X509KeyPairStreaming{
-			TLSKeyFile:  "",
-			TLSCertFile: "",
-		},
-		SandboxImage:            "k8s.gcr.io/pause:3.1",
-		StatsCollectPeriod:      10,
-		SystemdCgroup:           false,
-		MaxContainerLogLineSize: 16 * 1024,
-		Registry: Registry{
-			Mirrors: map[string]Mirror{
-				"docker.io": {
-					Endpoints: []string{"https://registry-1.docker.io"},
-				},
-			},
-		},
-	}
 }
 
 const (

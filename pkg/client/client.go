@@ -21,7 +21,6 @@ import (
 
 	"github.com/pkg/errors"
 	"google.golang.org/grpc"
-	"k8s.io/kubernetes/pkg/kubelet/util"
 
 	api "github.com/containerd/cri/pkg/api/v1"
 )
@@ -29,7 +28,7 @@ import (
 // NewCRIPluginClient creates grpc client of cri plugin
 // TODO(random-liu): Wrap grpc functions.
 func NewCRIPluginClient(ctx context.Context, endpoint string) (api.CRIPluginServiceClient, error) {
-	addr, dialer, err := util.GetAddressAndDialer(endpoint)
+	addr, dialer, err := GetAddressAndDialer(endpoint)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get dialer")
 	}

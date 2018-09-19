@@ -33,7 +33,6 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/apis/cri"
 	runtime "k8s.io/kubernetes/pkg/kubelet/apis/cri/runtime/v1alpha2"
 	"k8s.io/kubernetes/pkg/kubelet/remote"
-	kubeletutil "k8s.io/kubernetes/pkg/kubelet/util"
 
 	api "github.com/containerd/cri/pkg/api/v1"
 	"github.com/containerd/cri/pkg/client"
@@ -289,7 +288,7 @@ func PidOf(name string) (int, error) {
 
 // CRIConfig gets current cri config from containerd.
 func CRIConfig() (*criconfig.Config, error) {
-	addr, dialer, err := kubeletutil.GetAddressAndDialer(*criEndpoint)
+	addr, dialer, err := GetAddressAndDialer(*criEndpoint)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get dialer")
 	}

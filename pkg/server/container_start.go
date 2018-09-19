@@ -110,7 +110,7 @@ func (c *criService) startContainer(ctx context.Context,
 
 	var taskOpts []containerd.NewTaskOpts
 	if c.config.NoPivot {
-		taskOpts = append(taskOpts, containerd.WithNoPivotRoot)
+		taskOpts = addOptWithNoPivotRoot(taskOpts)
 	}
 	task, err := container.NewTask(ctx, ioCreation, taskOpts...)
 	if err != nil {

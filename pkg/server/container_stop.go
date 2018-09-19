@@ -25,7 +25,6 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
-	"golang.org/x/sys/unix"
 	runtime "k8s.io/kubernetes/pkg/kubelet/apis/cri/runtime/v1alpha2"
 
 	containerstore "github.com/containerd/cri/pkg/store/container"
@@ -77,7 +76,7 @@ func (c *criService) stopContainer(ctx context.Context, container containerstore
 	// We only need to kill the task. The event handler will Delete the
 	// task from containerd after it handles the Exited event.
 	if timeout > 0 {
-		stopSignal := unix.SIGTERM
+		stopSignal := SysTermSignal
 		image, err := c.imageStore.Get(container.ImageRef)
 		if err != nil {
 			// NOTE(random-liu): It's possible that the container is stopped,
@@ -105,7 +104,7 @@ func (c *criService) stopContainer(ctx context.Context, container containerstore
 	}
 
 	logrus.Infof("Kill container %q", id)
-	if err = task.Kill(ctx, unix.SIGKILL, containerd.WithKillAll); err != nil && !errdefs.IsNotFound(err) {
+	if err = task.Kill(ctx, SysKillSignal, containerd.WithKillAll); err != nil && !errdefs.IsNotFound(err) {
 		return errors.Wrapf(err, "failed to kill container %q", id)
 	}
 
@@ -126,7 +125,7 @@ func (c *criService) stopContainer(ctx context.Context, container containerstore
 	// NOTE(random-liu): If pid namespace is shared inside the pod, non-init processes
 	// of this container will be left running until the pause container is stopped.
 	logrus.Infof("Kill container %q init process", id)
-	if err = task.Kill(ctx, unix.SIGKILL); err != nil && !errdefs.IsNotFound(err) {
+	if err = task.Kill(ctx, SysKillSignal); err != nil && !errdefs.IsNotFound(err) {
 		return errors.Wrapf(err, "failed to kill container %q init process", id)
 	}
 

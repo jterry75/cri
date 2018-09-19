@@ -26,12 +26,20 @@ VERSION := $(shell git describe --tags --dirty --always)
 VERSION := $(VERSION:v%=%)
 TARBALL_PREFIX := cri-containerd
 TARBALL := $(TARBALL_PREFIX)-$(VERSION).$(GOOS)-$(GOARCH).tar.gz
-BUILD_TAGS := seccomp apparmor
+ifneq ($(GOOS),windows)
+	BUILD_TAGS := -tags "seccomp apparmor"
+else
+	BUILD_TAGS := -tags "windows_v2"
+endif
 # Add `-TEST` suffix to indicate that all binaries built from this repo are for test.
 GO_LDFLAGS := -X $(PROJECT)/vendor/github.com/containerd/containerd/version.Version=$(VERSION)-TEST
 SOURCES := $(shell find cmd/ pkg/ vendor/ -name '*.go')
 PLUGIN_SOURCES := $(shell ls *.go)
 INTEGRATION_SOURCES := $(shell find integration/ -name '*.go')
+
+ifeq ($(GOOS),windows)
+	BIN_EXT := .exe
+endif
 
 all: binaries
 
@@ -92,23 +100,23 @@ sync-vendor:
 update-vendor: sync-vendor sort-vendor
 
 $(BUILD_DIR)/ctr: $(SOURCES)
-	$(GO) build -o $@ \
-		-tags '$(BUILD_TAGS)' \
+	$(GO) build -o $@$(BIN_EXT) \
+		$(BUILD_TAGS) \
 		-ldflags '$(GO_LDFLAGS)' \
 		-gcflags '$(GO_GCFLAGS)' \
 		$(PROJECT)/cmd/ctr
 
 $(BUILD_DIR)/containerd: $(SOURCES) $(PLUGIN_SOURCES)
-	$(GO) build -o $@ \
-		-tags '$(BUILD_TAGS)' \
+	$(GO) build -o $@$(BIN_EXT) \
+		$(BUILD_TAGS) \
 		-ldflags '$(GO_LDFLAGS)' \
 		-gcflags '$(GO_GCFLAGS)' \
 		$(PROJECT)/cmd/containerd
 
 test:
 	$(GO) test -timeout=10m -race ./pkg/... \
-		-tags '$(BUILD_TAGS)' \
-	        -ldflags '$(GO_LDFLAGS)' \
+		$(BUILD_TAGS) \
+		-ldflags '$(GO_LDFLAGS)' \
 		-gcflags '$(GO_GCFLAGS)'
 
 $(BUILD_DIR)/integration.test: $(INTEGRATION_SOURCES)

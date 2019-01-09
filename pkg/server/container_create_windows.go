@@ -19,7 +19,10 @@ limitations under the License.
 package server
 
 import (
+	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/containerd/containerd"
@@ -30,6 +33,7 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/opencontainers/runtime-tools/generate"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
@@ -149,7 +153,10 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 		sandboxPlatform = "windows/amd64"
 	}
 
-	spec, err := c.generateContainerSpec(id, sandboxID, sandboxPid, sandbox.NetNSPath, config, sandboxConfig, sandboxPlatform, &image.ImageSpec.Config, nil)
+	// Create container volumes mounts.
+	volumeMounts := c.generateVolumeMounts(containerRootDir, config.GetMounts(), &image.ImageSpec.Config)
+
+	spec, err := c.generateContainerSpec(id, sandboxID, sandboxPid, sandbox.NetNSPath, config, sandboxConfig, sandboxPlatform, &image.ImageSpec.Config, volumeMounts)
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to generate container %q spec", id)
 	}
@@ -160,6 +167,14 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	opts := []containerd.NewContainerOpts{
 		containerd.WithSnapshotter(c.getDefaultSnapshotterForPlatform(sandboxPlatform)),
 		customopts.WithNewSnapshot(id, image.Image),
+	}
+
+	if len(volumeMounts) > 0 {
+		mountMap := make(map[string]string)
+		for _, v := range volumeMounts {
+			mountMap[v.HostPath] = v.ContainerPath
+		}
+		opts = append(opts, customopts.WithVolumes(mountMap))
 	}
 
 	meta.ImageRef = image.ID
@@ -265,6 +280,12 @@ func (c *criService) generateContainerSpec(id string, sandboxID string, sandboxP
 		g.AddProcessEnv(e.GetKey(), e.GetValue())
 	}
 
+	// Merge extra mounts and CRI mounts.
+	mounts := mergeMounts(config.GetMounts(), extraMounts)
+	if err := c.addOCIBindMounts(&g, mounts); err != nil {
+		return nil, errors.Wrapf(err, "failed to set OCI bind mounts %+v", mounts)
+	}
+
 	// Clear the root location since runhcs sets it on the mount path in the
 	// guest.
 	g.Config.Root = nil
@@ -276,4 +297,66 @@ func (c *criService) generateContainerSpec(id string, sandboxID string, sandboxP
 	g.AddAnnotation(annotations.SandboxID, sandboxID)
 
 	return g.Config, nil
+}
+
+// addOCIBindMounts adds bind mounts.
+func (c *criService) addOCIBindMounts(g *generate.Generator, mounts []*runtime.Mount) error {
+	// Sort mounts in number of parts. This ensures that high level mounts don't
+	// shadow other mounts.
+	sort.Sort(orderedMounts(mounts))
+
+	// Copy all mounts from default mounts, except for
+	// - mounts overriden by supplied mount;
+	// - all mounts under /dev if a supplied /dev is present.
+	mountSet := make(map[string]struct{})
+	for _, m := range mounts {
+		mountSet[filepath.Clean(m.ContainerPath)] = struct{}{}
+	}
+	defaultMounts := g.Mounts()
+	g.ClearMounts()
+	for _, m := range defaultMounts {
+		dst := filepath.Clean(m.Destination)
+		if _, ok := mountSet[dst]; ok {
+			// filter out mount overridden by a supplied mount
+			continue
+		}
+		if _, mountDev := mountSet["/dev"]; mountDev && strings.HasPrefix(dst, "/dev/") {
+			// filter out everything under /dev if /dev is a supplied mount
+			continue
+		}
+		g.AddMount(m)
+	}
+
+	for _, mount := range mounts {
+		dst := mount.GetContainerPath()
+		src := mount.GetHostPath()
+		// Create the host path if it doesn't exist.
+		if _, err := c.os.Stat(src); err != nil {
+			if !os.IsNotExist(err) {
+				return errors.Wrapf(err, "failed to stat %q", src)
+			}
+			if err := c.os.MkdirAll(src, 0755); err != nil {
+				return errors.Wrapf(err, "failed to mkdir %q", src)
+			}
+		}
+		src, err := c.os.ResolveSymbolicLink(src)
+		if err != nil {
+			return errors.Wrapf(err, "failed to resolve symlink %q", src)
+		}
+
+		options := []string{}
+		if mount.GetReadonly() {
+			options = append(options, "ro")
+		} else {
+			options = append(options, "rw")
+		}
+
+		g.AddMount(runtimespec.Mount{
+			Source:      src,
+			Destination: dst,
+			Options:     options,
+		})
+	}
+
+	return nil
 }

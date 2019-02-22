@@ -53,6 +53,9 @@ func (c *criService) UpdateRuntimeConfig(ctx context.Context, r *runtime.UpdateR
 	var copts []cni.CNIOpt
 	if osruntime.GOOS != "windows" {
 		copts = append(copts, cni.WithLoNetwork)
+	} else {
+		copts = append(copts, cni.WithInterfacePrefix(defaultWindowsIfName))
+		copts = append(copts, cni.WithoutInterfaceSuffix())
 	}
 	copts = append(copts, cni.WithDefaultConf)
 

@@ -47,6 +47,9 @@ func (c *criService) Status(ctx context.Context, r *runtime.StatusRequest) (*run
 	var copts []cni.CNIOpt
 	if osruntime.GOOS != "windows" {
 		copts = append(copts, cni.WithLoNetwork)
+	} else {
+		copts = append(copts, cni.WithInterfacePrefix(defaultWindowsIfName))
+		copts = append(copts, cni.WithoutInterfaceSuffix())
 	}
 	copts = append(copts, cni.WithDefaultConf)
 	// Load the latest cni configuration to be in sync with the latest network configuration

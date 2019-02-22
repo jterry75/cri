@@ -151,6 +151,9 @@ func NewCRIService(config criconfig.Config, client *containerd.Client) (CRIServi
 	var copts []cni.CNIOpt
 	if osruntime.GOOS != "windows" {
 		copts = append(copts, cni.WithLoNetwork)
+	} else {
+		copts = append(copts, cni.WithInterfacePrefix(defaultWindowsIfName))
+		copts = append(copts, cni.WithoutInterfaceSuffix())
 	}
 	copts = append(copts, cni.WithDefaultConf)
 	if err := c.netPlugin.Load(copts...); err != nil {

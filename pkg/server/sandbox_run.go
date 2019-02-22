@@ -20,7 +20,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-
+	osruntime "runtime"
+	
 	"github.com/containerd/cri/pkg/annotations"
 	"github.com/containerd/cri/pkg/netns"
 	sandboxstore "github.com/containerd/cri/pkg/store/sandbox"
@@ -119,7 +120,11 @@ func (c *criService) setupPod(id string, path string, config *runtime.PodSandbox
 	}
 	logDebugCNIResult(id, result)
 	// Check if the default interface has IP config
-	if configs, ok := result.Interfaces[defaultIfName]; ok && len(configs.IPConfigs) > 0 {
+	ifName := defaultIfName
+	if osruntime.GOOS == "windows" {
+		ifName = defaultWindowsIfName
+	}
+	if configs, ok := result.Interfaces[ifName]; ok && len(configs.IPConfigs) > 0 {
 		return selectPodIP(configs.IPConfigs), result, nil
 	}
 	// If it comes here then the result was invalid so destroy the pod network and return error

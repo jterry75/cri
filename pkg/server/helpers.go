@@ -119,6 +119,7 @@ const (
 const (
 	// defaultIfName is the default network interface for the pods
 	defaultIfName = "eth0"
+	defaultWindowsIfName = "Ethernet"
 	// networkAttachCount is the minimum number of networks the PodSandbox
 	// attaches to
 	networkAttachCount        = 2

@@ -22,6 +22,7 @@ import (
 	"os"
 
 	"github.com/BurntSushi/toml"
+	"github.com/containerd/containerd/pkg/timeout"
 	"github.com/containerd/containerd/services/server"
 	srvconfig "github.com/containerd/containerd/services/server/config"
 	"github.com/urfave/cli"
@@ -50,6 +51,11 @@ var configCommand = cli.Command{
 				config := &Config{
 					Config: defaultConfig(),
 				}
+				// for the time being, keep the defaultConfig's version set at 1 so that
+				// when a config without a version is loaded from disk and has no version
+				// set, we assume it's a v1 config.  But when generating new configs via
+				// this command, generate the v2 config
+				config.Config.Version = 2
 				plugins, err := server.LoadPlugins(gocontext.Background(), config.Config)
 				if err != nil {
 					return err
@@ -60,9 +66,15 @@ var configCommand = cli.Command{
 						if p.Config == nil {
 							continue
 						}
-						config.Plugins[p.ID] = p.Config
+						config.Plugins[p.URI()] = p.Config
 					}
 				}
+				timeouts := timeout.All()
+				config.Timeouts = make(map[string]string)
+				for k, v := range timeouts {
+					config.Timeouts[k] = v.String()
+				}
+
 				_, err = config.WriteTo(os.Stdout)
 				return err
 			},

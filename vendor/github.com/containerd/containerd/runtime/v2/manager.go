@@ -69,25 +69,26 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			return New(ic.Context, ic.Root, ic.State, ic.Address, ic.Events, m.(*metadata.DB))
+			return New(ic.Context, ic.Root, ic.State, ic.Address, ic.TTRPCAddress, ic.Events, m.(*metadata.DB))
 		},
 	})
 }
 
 // New task manager for v2 shims
-func New(ctx context.Context, root, state, containerdAddress string, events *exchange.Exchange, db *metadata.DB) (*TaskManager, error) {
+func New(ctx context.Context, root, state, containerdAddress, containerdTTRPCAddress string, events *exchange.Exchange, db *metadata.DB) (*TaskManager, error) {
 	for _, d := range []string{root, state} {
 		if err := os.MkdirAll(d, 0711); err != nil {
 			return nil, err
 		}
 	}
 	m := &TaskManager{
-		root:              root,
-		state:             state,
-		containerdAddress: containerdAddress,
-		tasks:             runtime.NewTaskList(),
-		events:            events,
-		db:                db,
+		root:                   root,
+		state:                  state,
+		containerdAddress:      containerdAddress,
+		containerdTTRPCAddress: containerdTTRPCAddress,
+		tasks:                  runtime.NewTaskList(),
+		events:                 events,
+		db:                     db,
 	}
 	if err := m.loadExistingTasks(ctx); err != nil {
 		return nil, err
@@ -97,9 +98,10 @@ func New(ctx context.Context, root, state, containerdAddress string, events *exc
 
 // TaskManager manages v2 shim's and their tasks
 type TaskManager struct {
-	root              string
-	state             string
-	containerdAddress string
+	root                   string
+	state                  string
+	containerdAddress      string
+	containerdTTRPCAddress string
 
 	tasks  *runtime.TaskList
 	events *exchange.Exchange
@@ -113,6 +115,10 @@ func (m *TaskManager) ID() string {
 
 // Create a new task
 func (m *TaskManager) Create(ctx context.Context, id string, opts runtime.CreateOpts) (_ runtime.Task, err error) {
+	ns, err := namespaces.NamespaceRequired(ctx)
+	if err != nil {
+		return nil, err
+	}
 	bundle, err := NewBundle(ctx, m.root, m.state, id, opts.Spec.Value)
 	if err != nil {
 		return nil, err
@@ -127,8 +133,21 @@ func (m *TaskManager) Create(ctx context.Context, id string, opts runtime.Create
 		topts = opts.RuntimeOptions
 	}
 
-	b := shimBinary(ctx, bundle, opts.Runtime, m.containerdAddress, m.events, m.tasks)
-	shim, err := b.Start(ctx, topts)
+	b := shimBinary(ctx, bundle, opts.Runtime, m.containerdAddress, m.containerdTTRPCAddress, m.events, m.tasks)
+	shim, err := b.Start(ctx, topts, func() {
+		log.G(ctx).WithField("id", id).Info("shim disconnected")
+		_, err := m.tasks.Get(ctx, id)
+		if err != nil {
+			// Task was never started or was already successfully deleted
+			return
+		}
+		cleanupAfterDeadShim(context.Background(), id, ns, m.events, b)
+		// Remove self from the runtime task list. Even though the cleanupAfterDeadShim()
+		// would publish taskExit event, but the shim.Delete() would always failed with ttrpc
+		// disconnect and there is no chance to remove this dead task from runtime task lists.
+		// Thus it's better to delete it here.
+		m.tasks.Delete(ctx, id)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -207,6 +226,10 @@ func (m *TaskManager) loadTasks(ctx context.Context) error {
 			continue
 		}
 		id := sd.Name()
+		// skip hidden directories
+		if len(id) > 0 && id[0] == '.' {
+			continue
+		}
 		bundle, err := LoadBundle(ctx, m.state, id)
 		if err != nil {
 			// fine to return error here, it is a programmer error if the context
@@ -224,23 +247,29 @@ func (m *TaskManager) loadTasks(ctx context.Context) error {
 			bundle.Delete()
 			continue
 		}
-		shim, err := loadShim(ctx, bundle, m.events, m.tasks)
+		container, err := m.container(ctx, id)
 		if err != nil {
-			log.G(ctx).WithError(err).Errorf("cleanup dead shim %s", id)
-			container, err := m.container(ctx, id)
+			log.G(ctx).WithError(err).Errorf("loading container %s", id)
+			if err := mount.UnmountAll(filepath.Join(bundle.Path, "rootfs"), 0); err != nil {
+				log.G(ctx).WithError(err).Errorf("forceful unmount of rootfs %s", id)
+			}
+			bundle.Delete()
+			continue
+		}
+		binaryCall := shimBinary(ctx, bundle, container.Runtime.Name, m.containerdAddress, m.containerdTTRPCAddress, m.events, m.tasks)
+		shim, err := loadShim(ctx, bundle, m.events, m.tasks, func() {
+			log.G(ctx).WithField("id", id).Info("shim disconnected")
+			_, err := m.tasks.Get(ctx, id)
 			if err != nil {
-				log.G(ctx).WithError(err).Errorf("loading dead container %s", id)
-				if err := mount.UnmountAll(filepath.Join(bundle.Path, "rootfs"), 0); err != nil {
-					log.G(ctx).WithError(err).Errorf("forceful unmount of rootfs %s", id)
-				}
-				bundle.Delete()
-				continue
+				// Task was never started or was already successfully deleted
+				return
 			}
-			binaryCall := shimBinary(ctx, bundle, container.Runtime.Name, m.containerdAddress, m.events, m.tasks)
-			if _, err := binaryCall.Delete(ctx); err != nil {
-				log.G(ctx).WithError(err).Errorf("binary call to delete for %s", id)
-				continue
-			}
+			cleanupAfterDeadShim(context.Background(), id, ns, m.events, binaryCall)
+			// Remove self from the runtime task list.
+			m.tasks.Delete(ctx, id)
+		})
+		if err != nil {
+			cleanupAfterDeadShim(ctx, id, ns, m.events, binaryCall)
 			continue
 		}
 		m.tasks.Add(ctx, shim)

@@ -18,6 +18,8 @@ package metadata
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/containerd/containerd/errdefs"
@@ -30,7 +32,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-// LeaseManager manages the create/delete lifecyle of leases
+// LeaseManager manages the create/delete lifecycle of leases
 // and also returns existing leases
 type LeaseManager struct {
 	tx *bolt.Tx
@@ -93,7 +95,7 @@ func (lm *LeaseManager) Create(ctx context.Context, opts ...leases.Opt) (leases.
 	return l, nil
 }
 
-// Delete delets the lease with the provided lease ID
+// Delete deletes the lease with the provided lease ID
 func (lm *LeaseManager) Delete(ctx context.Context, lease leases.Lease, _ ...leases.DeleteOpt) error {
 	namespace, err := namespaces.NamespaceRequired(ctx)
 	if err != nil {
@@ -165,6 +167,128 @@ func (lm *LeaseManager) List(ctx context.Context, fs ...string) ([]leases.Lease,
 	}
 
 	return ll, nil
+}
+
+// AddResource references the resource by the provided lease.
+func (lm *LeaseManager) AddResource(ctx context.Context, lease leases.Lease, r leases.Resource) error {
+	namespace, err := namespaces.NamespaceRequired(ctx)
+	if err != nil {
+		return err
+	}
+
+	topbkt := getBucket(lm.tx, bucketKeyVersion, []byte(namespace), bucketKeyObjectLeases, []byte(lease.ID))
+	if topbkt == nil {
+		return errors.Wrapf(errdefs.ErrNotFound, "lease %q", lease.ID)
+	}
+
+	keys, ref, err := parseLeaseResource(r)
+	if err != nil {
+		return err
+	}
+
+	bkt := topbkt
+	for _, key := range keys {
+		bkt, err = bkt.CreateBucketIfNotExists([]byte(key))
+		if err != nil {
+			return err
+		}
+	}
+	return bkt.Put([]byte(ref), nil)
+}
+
+// DeleteResource dereferences the resource by the provided lease.
+func (lm *LeaseManager) DeleteResource(ctx context.Context, lease leases.Lease, r leases.Resource) error {
+	namespace, err := namespaces.NamespaceRequired(ctx)
+	if err != nil {
+		return err
+	}
+
+	topbkt := getBucket(lm.tx, bucketKeyVersion, []byte(namespace), bucketKeyObjectLeases, []byte(lease.ID))
+	if topbkt == nil {
+		return errors.Wrapf(errdefs.ErrNotFound, "lease %q", lease.ID)
+	}
+
+	keys, ref, err := parseLeaseResource(r)
+	if err != nil {
+		return err
+	}
+
+	bkt := topbkt
+	for _, key := range keys {
+		if bkt == nil {
+			break
+		}
+		bkt = bkt.Bucket([]byte(key))
+	}
+
+	if bkt == nil {
+		return nil
+	}
+	return bkt.Delete([]byte(ref))
+}
+
+// ListResources lists all the resources referenced by the lease.
+func (lm *LeaseManager) ListResources(ctx context.Context, lease leases.Lease) ([]leases.Resource, error) {
+	namespace, err := namespaces.NamespaceRequired(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	topbkt := getBucket(lm.tx, bucketKeyVersion, []byte(namespace), bucketKeyObjectLeases, []byte(lease.ID))
+	if topbkt == nil {
+		return nil, errors.Wrapf(errdefs.ErrNotFound, "lease %q", lease.ID)
+	}
+
+	rs := make([]leases.Resource, 0)
+
+	// content resources
+	if cbkt := topbkt.Bucket(bucketKeyObjectContent); cbkt != nil {
+		if err := cbkt.ForEach(func(k, _ []byte) error {
+			rs = append(rs, leases.Resource{
+				ID:   string(k),
+				Type: string(bucketKeyObjectContent),
+			})
+
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	// ingest resources
+	if lbkt := topbkt.Bucket(bucketKeyObjectIngests); lbkt != nil {
+		if err := lbkt.ForEach(func(k, _ []byte) error {
+			rs = append(rs, leases.Resource{
+				ID:   string(k),
+				Type: string(bucketKeyObjectIngests),
+			})
+
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	// snapshot resources
+	if sbkt := topbkt.Bucket(bucketKeyObjectSnapshots); sbkt != nil {
+		if err := sbkt.ForEach(func(sk, sv []byte) error {
+			if sv != nil {
+				return nil
+			}
+
+			snbkt := sbkt.Bucket(sk)
+			return snbkt.ForEach(func(k, _ []byte) error {
+				rs = append(rs, leases.Resource{
+					ID:   string(k),
+					Type: fmt.Sprintf("%s/%s", bucketKeyObjectSnapshots, sk),
+				})
+				return nil
+			})
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return rs, nil
 }
 
 func addSnapshotLease(ctx context.Context, tx *bolt.Tx, snapshotter, key string) error {
@@ -306,4 +430,37 @@ func removeIngestLease(ctx context.Context, tx *bolt.Tx, ref string) error {
 	}
 
 	return bkt.Delete([]byte(ref))
+}
+
+func parseLeaseResource(r leases.Resource) ([]string, string, error) {
+	var (
+		ref  = r.ID
+		typ  = r.Type
+		keys = strings.Split(typ, "/")
+	)
+
+	switch k := keys[0]; k {
+	case string(bucketKeyObjectContent),
+		string(bucketKeyObjectIngests):
+
+		if len(keys) != 1 {
+			return nil, "", errors.Wrapf(errdefs.ErrInvalidArgument, "invalid resource type %s", typ)
+		}
+
+		if k == string(bucketKeyObjectContent) {
+			dgst, err := digest.Parse(ref)
+			if err != nil {
+				return nil, "", errors.Wrapf(errdefs.ErrInvalidArgument, "invalid content resource id %s: %v", ref, err)
+			}
+			ref = dgst.String()
+		}
+	case string(bucketKeyObjectSnapshots):
+		if len(keys) != 2 {
+			return nil, "", errors.Wrapf(errdefs.ErrInvalidArgument, "invalid snapshot resource type %s", typ)
+		}
+	default:
+		return nil, "", errors.Wrapf(errdefs.ErrNotImplemented, "resource type %s not supported yet", typ)
+	}
+
+	return keys, ref, nil
 }

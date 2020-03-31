@@ -88,21 +88,22 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 		},
 	)
 
-	// Ensure sandbox container image snapshot.
-	image, err := c.ensureImageExists(ctx, c.config.SandboxImage, config)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to get sandbox image %q", c.config.SandboxImage)
-	}
-	containerdImage, err := c.toContainerdImage(ctx, *image)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to get image from containerd %q", image.ID)
-	}
-
 	ociRuntime, err := c.getSandboxRuntime(config, r.GetRuntimeHandler())
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get sandbox runtime")
 	}
 	log.G(ctx).Debugf("Use OCI %+v for sandbox %q", ociRuntime, id)
+
+	// Ensure sandbox container image snapshot.
+	sandboxImage := c.resolveSandboxImageName(ociRuntime)
+	image, err := c.ensureImageExists(ctx, sandboxImage, config)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to get sandbox image %q", sandboxImage)
+	}
+	containerdImage, err := c.toContainerdImage(ctx, *image)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to get image from containerd %q", image.ID)
+	}
 
 	podNetwork := true
 	// Pod network is always needed on windows.
@@ -154,7 +155,7 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 	// NOTE: sandboxContainerSpec SHOULD NOT have side
 	// effect, e.g. accessing/creating files, so that we can test
 	// it safely.
-	spec, err := c.sandboxContainerSpec(id, config, &image.ImageSpec.Config, sandbox.NetNSPath, ociRuntime.PodAnnotations)
+	spec, err := c.sandboxContainerSpec(id, config, &image.ImageSpec.Config, sandbox.NetNSPath, ociRuntime)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate sandbox container spec")
 	}

@@ -22,8 +22,11 @@ import (
 	"context"
 	"path/filepath"
 	"sort"
+	"strings"
 
+	runhcsoptions "github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/options"
 	"github.com/containerd/containerd/containers"
+	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/oci"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
@@ -49,7 +52,7 @@ func WithWindowsNetworkNamespace(path string) oci.SpecOpts {
 
 // WithWindowsMounts sorts and adds runtime and CRI mounts to the spec for
 // windows container.
-func WithWindowsMounts(osi osinterface.OS, config *runtime.ContainerConfig, extra []*runtime.Mount) oci.SpecOpts {
+func WithWindowsMounts(osi osinterface.OS, config *runtime.ContainerConfig, extra []*runtime.Mount, sandboxIsolation runhcsoptions.Options_SandboxIsolation) oci.SpecOpts {
 	return func(ctx context.Context, client oci.Client, _ *containers.Container, s *runtimespec.Spec) error {
 		// mergeMounts merge CRI mounts with extra mounts. If a mount destination
 		// is mounted by both a CRI mount and an extra mount, the CRI mount will
@@ -97,20 +100,50 @@ func WithWindowsMounts(osi osinterface.OS, config *runtime.ContainerConfig, extr
 
 		for _, mount := range mounts {
 			var (
-				dst = mount.GetContainerPath()
-				src = mount.GetHostPath()
+				mountType string
+				dst       = mount.GetContainerPath()
+				src       = mount.GetHostPath()
 			)
-			// TODO(windows): Support special mount sources, e.g. named pipe.
-			// Create the host path if it doesn't exist.
-			if _, err := osi.Stat(src); err != nil {
-				// If the source doesn't exist, return an error instead
-				// of creating the source. This aligns with Docker's
-				// behavior on windows.
-				return errors.Wrapf(err, "failed to stat %q", src)
+
+			if strings.Contains(src, "kubernetes.io~empty-dir") {
+				// TODO(windows): support kubernetes.io~empty-dir for process and hypervisor wcow
+				return errors.Wrapf(errdefs.ErrUnavailable, "'kubernetes.io~empty-dir' mount %q are not currently supported", src)
+			} else if sandboxIsolation == runhcsoptions.Options_HYPERVISOR {
+				if strings.HasPrefix(src, `\\.\PHYSICALDRIVE`) {
+					mountType = "physical-disk"
+				} else if strings.HasPrefix(src, "vhd://") {
+					formattedSource, err := filepath.EvalSymlinks(filepath.Clean(strings.TrimPrefix(src, "vhd://")))
+					if err != nil {
+						return errors.Wrapf(err, "vhd:// mount %q failed to EvalSymlinks", src)
+					}
+
+					if s, err := osi.Stat(formattedSource); err != nil {
+						return errors.Wrapf(err, "vhd:// mount %q failed to stat", formattedSource)
+					} else if s.IsDir() {
+						return errors.Errorf("vhd:// mount %q must not be a directory", formattedSource)
+					} else if ext := filepath.Ext(s.Name()); ext != ".vhd" && ext != ".vhdx" {
+						return errors.Errorf("vhd:// mount %q must end in .vhd or .vhdx")
+					}
+
+					mountType = "virtual-disk"
+					src = formattedSource
+				}
 			}
-			src, err := osi.ResolveSymbolicLink(src)
-			if err != nil {
-				return errors.Wrapf(err, "failed to resolve symlink %q", src)
+
+			// For WCOW mountType == "" means file/directory/npipe mount.
+			if mountType == "" {
+				formattedSource := src
+				if !strings.HasPrefix(src, `\\.\pipe`) {
+					var err error
+					formattedSource, err = filepath.EvalSymlinks(filepath.Clean(src))
+					if err != nil {
+						return errors.Wrapf(err, "file/directory mount %q failed to EvalSymlinks", src)
+					}
+
+					if _, err := osi.Stat(formattedSource); err != nil {
+						return errors.Wrapf(err, "file/directory mount %q failed to stat", formattedSource)
+					}
+				}
 			}
 
 			var options []string
@@ -122,8 +155,7 @@ func WithWindowsMounts(osi osinterface.OS, config *runtime.ContainerConfig, extr
 				options = append(options, "rw")
 			}
 			s.Mounts = append(s.Mounts, runtimespec.Mount{
-				// hcsshim requires clean path, especially '/' -> '\'.
-				Source:      filepath.Clean(src),
+				Source:      src,
 				Destination: filepath.Clean(dst),
 				Options:     options,
 			})
@@ -187,4 +219,16 @@ func WithWindowsDefaultSandboxShares(ctx context.Context, client oci.Client, c *
 	i := uint16(DefaultSandboxCPUshares)
 	s.Windows.Resources.CPU.Shares = &i
 	return nil
+}
+
+// WithWindowsCredentialSpec assigns `credentialSpec` to the
+// `runtime.Spec.Windows.CredentialSpec` field.
+func WithWindowsCredentialSpec(credentialSpec string) oci.SpecOpts {
+	return func(ctx context.Context, client oci.Client, c *containers.Container, s *runtimespec.Spec) error {
+		if s.Windows == nil {
+			s.Windows = &runtimespec.Windows{}
+		}
+		s.Windows.CredentialSpec = credentialSpec
+		return nil
+	}
 }

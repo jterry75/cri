@@ -310,8 +310,10 @@ func generateRuntimeOptions(r criconfig.Runtime, c criconfig.Config) (interface{
 		}, nil
 	}
 	options := getRuntimeOptionsType(r.Type)
-	if err := toml.PrimitiveDecode(*r.Options, options); err != nil {
-		return nil, err
+	if to, ok := r.Options.(*toml.Primitive); ok {
+		if err := toml.PrimitiveDecode(*to, options); err != nil {
+			return nil, err
+		}
 	}
 	return options, nil
 }

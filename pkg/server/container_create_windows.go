@@ -19,6 +19,7 @@ limitations under the License.
 package server
 
 import (
+	runhcsoptions "github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/options"
 	"github.com/containerd/containerd/oci"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
@@ -37,6 +38,11 @@ func (c *criService) containerMounts(sandboxID string, config *runtime.Container
 func (c *criService) containerSpec(id string, sandboxID string, sandboxPid uint32, netNSPath string,
 	config *runtime.ContainerConfig, sandboxConfig *runtime.PodSandboxConfig, imageConfig *imagespec.ImageConfig,
 	extraMounts []*runtime.Mount, ociRuntime config.Runtime) (*runtimespec.Spec, error) {
+	var rhcso runhcsoptions.Options
+	if ociRuntime.Options != nil {
+		rhcso = ociRuntime.Options.(runhcsoptions.Options)
+	}
+
 	specOpts := []oci.SpecOpts{
 		customopts.WithProcessArgs(config, imageConfig),
 	}
@@ -66,15 +72,21 @@ func (c *criService) containerSpec(id string, sandboxID string, sandboxPid uint3
 		oci.WithHostname(sandboxConfig.GetHostname()),
 	)
 
-	specOpts = append(specOpts, customopts.WithWindowsMounts(c.os, config, extraMounts))
+	specOpts = append(specOpts, customopts.WithWindowsMounts(c.os, config, extraMounts, rhcso.SandboxIsolation))
 
 	specOpts = append(specOpts, customopts.WithWindowsResources(config.GetWindows().GetResources()))
 
-	username := config.GetWindows().GetSecurityContext().GetRunAsUsername()
-	if username != "" {
-		specOpts = append(specOpts, oci.WithUser(username))
+	securityContext := config.GetWindows().GetSecurityContext()
+	if securityContext != nil {
+		username := securityContext.GetRunAsUsername()
+		if username != "" {
+			specOpts = append(specOpts, oci.WithUser(username))
+		}
+		cs := securityContext.GetCredentialSpec()
+		if cs != "" {
+			specOpts = append(specOpts, customopts.WithWindowsCredentialSpec(cs))
+		}
 	}
-	// TODO(windows): Add CredentialSpec support.
 
 	for pKey, pValue := range getPassthroughAnnotations(sandboxConfig.Annotations,
 		ociRuntime.PodAnnotations) {

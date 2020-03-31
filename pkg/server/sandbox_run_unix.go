@@ -33,12 +33,17 @@ import (
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
 	"github.com/containerd/cri/pkg/annotations"
+	criconfig "github.com/containerd/cri/pkg/config"
 	customopts "github.com/containerd/cri/pkg/containerd/opts"
 	osinterface "github.com/containerd/cri/pkg/os"
 )
 
+func (c *criService) resolveSandboxImageName(ociRuntime criconfig.Runtime) string {
+	return c.config.SandboxImage
+}
+
 func (c *criService) sandboxContainerSpec(id string, config *runtime.PodSandboxConfig,
-	imageConfig *imagespec.ImageConfig, nsPath string, runtimePodAnnotations []string) (*runtimespec.Spec, error) {
+	imageConfig *imagespec.ImageConfig, nsPath string, ociRuntime criconfig.Runtime) (*runtimespec.Spec, error) {
 	// Creates a spec Generator with the default spec.
 	// TODO(random-liu): [P1] Compare the default settings with docker and containerd default.
 	specOpts := []oci.SpecOpts{
@@ -141,7 +146,7 @@ func (c *criService) sandboxContainerSpec(id string, config *runtime.PodSandboxC
 	specOpts = append(specOpts, customopts.WithPodOOMScoreAdj(int(defaultSandboxOOMAdj), c.config.RestrictOOMScoreAdj))
 
 	for pKey, pValue := range getPassthroughAnnotations(config.Annotations,
-		runtimePodAnnotations) {
+		ociRuntime.PodAnnotations) {
 		specOpts = append(specOpts, customopts.WithAnnotation(pKey, pValue))
 	}
 

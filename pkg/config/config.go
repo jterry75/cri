@@ -20,7 +20,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/BurntSushi/toml"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plugin"
 	"github.com/pkg/errors"
@@ -48,7 +47,7 @@ type Runtime struct {
 	Root string `toml:"runtime_root" json:"runtimeRoot"`
 	// Options are config options for the runtime. If options is loaded
 	// from toml config, it will be toml.Primitive.
-	Options *toml.Primitive `toml:"options" json:"options"`
+	Options interface{} `toml:"options" json:"options"`
 	// PrivilegedWithoutHostDevices overloads the default behaviour for adding host devices to the
 	// runtime spec when the container is privileged. Defaults to false.
 	PrivilegedWithoutHostDevices bool `toml:"privileged_without_host_devices" json:"privileged_without_host_devices"`
@@ -259,6 +258,10 @@ const (
 func ValidatePluginConfig(ctx context.Context, c *PluginConfig) error {
 	if c.ContainerdConfig.Runtimes == nil {
 		c.ContainerdConfig.Runtimes = make(map[string]Runtime)
+	}
+
+	if err := fixupPlatformConfig(c); err != nil {
+		return err
 	}
 
 	// Validation for deprecated untrusted_workload_runtime.

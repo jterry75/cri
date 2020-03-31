@@ -67,3 +67,8 @@ func DefaultConfig() PluginConfig {
 		DisableProcMount:       false,
 	}
 }
+
+// fixupPlatformConfig is not currently used on *nix platforms.
+func fixupPlatformConfig(c *PluginConfig) error {
+	return nil
+}

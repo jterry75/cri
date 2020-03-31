@@ -19,6 +19,7 @@ limitations under the License.
 package server
 
 import (
+	runhcsoptions "github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/options"
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/oci"
 	imagespec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -27,16 +28,36 @@ import (
 	runtime "k8s.io/cri-api/pkg/apis/runtime/v1alpha2"
 
 	"github.com/containerd/cri/pkg/annotations"
+	criconfig "github.com/containerd/cri/pkg/config"
 	customopts "github.com/containerd/cri/pkg/containerd/opts"
 )
 
+func (c *criService) resolveSandboxImageName(ociRuntime criconfig.Runtime) string {
+	sandboxImage := c.config.SandboxImage
+	if ociRuntime.Options != nil {
+		rhcso := ociRuntime.Options.(runhcsoptions.Options)
+		if rhcso.SandboxImage != "" {
+			sandboxImage = rhcso.SandboxImage
+		}
+	}
+	return sandboxImage
+}
+
 func (c *criService) sandboxContainerSpec(id string, config *runtime.PodSandboxConfig,
-	imageConfig *imagespec.ImageConfig, nsPath string, runtimePodAnnotations []string) (*runtimespec.Spec, error) {
+	imageConfig *imagespec.ImageConfig, nsPath string, ociRuntime criconfig.Runtime) (*runtimespec.Spec, error) {
 	// Creates a spec Generator with the default spec.
 	specOpts := []oci.SpecOpts{
 		oci.WithEnv(imageConfig.Env),
 		oci.WithHostname(config.GetHostname()),
 	}
+
+	if ociRuntime.Options != nil {
+		rhcso := ociRuntime.Options.(runhcsoptions.Options)
+		if rhcso.SandboxIsolation == runhcsoptions.Options_HYPERVISOR {
+			specOpts = append(specOpts, oci.WithWindowsHyperV)
+		}
+	}
+
 	if imageConfig.WorkingDir != "" {
 		specOpts = append(specOpts, oci.WithProcessCwd(imageConfig.WorkingDir))
 	}
@@ -57,7 +78,7 @@ func (c *criService) sandboxContainerSpec(id string, config *runtime.PodSandboxC
 	specOpts = append(specOpts, customopts.WithWindowsDefaultSandboxShares)
 
 	for pKey, pValue := range getPassthroughAnnotations(config.Annotations,
-		runtimePodAnnotations) {
+		ociRuntime.PodAnnotations) {
 		specOpts = append(specOpts, customopts.WithAnnotation(pKey, pValue))
 	}
 

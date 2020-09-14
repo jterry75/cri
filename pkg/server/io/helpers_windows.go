@@ -253,7 +253,7 @@ func newBinaryLogger(id string, fifos *cio.FIFOSet, binaryPath string, labels ma
 	}
 
 	labelStr := string(labelData)
-	cmd := exec.Command(binaryPath, fifos.Stdout, fifos.Stderr, signalFileName, labelStr)
+	cmd := exec.Command(binaryPath, fifos.Stdout, fifos.Stderr, signalFileName, id, labelStr)
 
 	if err := cmd.Start(); err != nil {
 		return nil, err

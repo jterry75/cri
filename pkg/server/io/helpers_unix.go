@@ -72,3 +72,7 @@ func newStdioPipes(fifos *cio.FIFOSet) (_ *stdioPipes, _ *wgCloser, err error) {
 		cancel: cancel,
 	}, nil
 }
+
+func newBinaryLogger(_ string, _ *cio.FIFOSet, _ string, , _ map[string]string) (_ *wgCloser, _ error) {
+	return nil, errors.New("not implemented")
+}

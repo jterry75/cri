@@ -189,7 +189,10 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	}
 
 	containerIO, err := cio.NewContainerIO(id,
+		meta.LogPath,
+		meta.Config.Labels,
 		cio.WithNewFIFOs(volatileContainerRootDir, config.GetTty(), config.GetStdin()))
+
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create container io")
 	}

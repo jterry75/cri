@@ -22,7 +22,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -60,6 +59,28 @@ func init() {
 const (
 	rootfsSizeLabel = "containerd.io/snapshot/io.microsoft.container.storage.rootfs.size-gb"
 	rootfsLocLabel  = "containerd.io/snapshot/io.microsoft.container.storage.rootfs.location"
+	// Labels specifying that we'd like to re-use the scratch space of another container (common use case
+	// being to re-use the sandbox.vhd of the pod sandbox container for kubernetes). This saves an unnecessary
+	// copy of a scratch disk and makes it so that disk space used on the host can be discerned at the pod level
+	// instead of at the container level as the entire pod will have X GB of space available instead of each container
+	// having a varying level of space.
+	//
+	// `reuseScratchLabel` specifies that we want this behavior.
+	//
+	// `reuseScratchContainerTypeLabel` is used to determine if this snapshot is for a container that will be
+	// sharing another containers scratch space, or if this IS the snapshot that will be shared and to make a new snapshot
+	// and copy a scratch.vhd over.
+	//
+	// `reuseScratchLabelSandboxFormat` is used to tell if there has been a snapshot made with ID %s yet, and if so and
+	// the current snapshot being made is NOT for a sandbox container, skip making a new snapshot and reuse the
+	// sandbox.vhd and directory from the sandbox containers. This will be a mapping from ``...sandbox-%s` to snapshotter key.
+	//
+	// `reuseScratchLabelSandboxIdLabel` is used to store the sandbox containers id to the meta store for retrieval
+	// later on.
+	reuseScratchLabel               = "containerd.io/snapshot/io.microsoft.container.storage.reuse-scratch"
+	reuseScratchContainerTypeLabel  = "containerd.io/snapshot/io.microsoft.container.storage.reuse-scratch.container-type"
+	reuseScratchLabelSandboxFormat  = "containerd.io/snapshot/io.microsoft.container.storage.reuse-scratch.sandbox-%s"
+	reuseScratchLabelSandboxIDLabel = "containerd.io/snapshot/io.microsoft.sandbox.id"
 )
 
 type snapshotter struct {
@@ -120,7 +141,14 @@ func (s *snapshotter) Update(ctx context.Context, info snapshots.Info, fieldpath
 	if err != nil {
 		return snapshots.Info{}, err
 	}
-	defer t.Rollback()
+
+	defer func() {
+		if err != nil && t != nil {
+			if rerr := t.Rollback(); rerr != nil {
+				log.G(ctx).WithError(rerr).Warn("failed to rollback transaction")
+			}
+		}
+	}()
 
 	info, err = storage.UpdateInfo(ctx, info, fieldpaths...)
 	if err != nil {
@@ -177,9 +205,9 @@ func (s *snapshotter) Mounts(ctx context.Context, key string) ([]mount.Mount, er
 	if err != nil {
 		return nil, err
 	}
-	defer t.Rollback()
 
 	snapshot, err := storage.GetSnapshot(ctx, key)
+	t.Rollback()
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to get snapshot mount")
 	}
@@ -192,7 +220,14 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 	if err != nil {
 		return err
 	}
-	defer t.Rollback()
+
+	defer func() {
+		if err != nil {
+			if rerr := t.Rollback(); rerr != nil {
+				log.G(ctx).WithError(rerr).Warn("failed to rollback transaction")
+			}
+		}
+	}()
 
 	usage := fs.Usage{
 		Size: 0,
@@ -202,10 +237,7 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 		return errors.Wrap(err, "failed to commit snapshot")
 	}
 
-	if err := t.Commit(); err != nil {
-		return err
-	}
-	return nil
+	return t.Commit()
 }
 
 // Remove abandons the transaction identified by key. All resources
@@ -216,7 +248,13 @@ func (s *snapshotter) Remove(ctx context.Context, key string) error {
 	if err != nil {
 		return err
 	}
-	defer t.Rollback()
+	defer func() {
+		if err != nil {
+			if rerr := t.Rollback(); rerr != nil {
+				log.G(ctx).WithError(rerr).Warn("failed to rollback transaction")
+			}
+		}
+	}()
 
 	id, _, err := storage.Remove(ctx, key)
 	if err != nil {
@@ -309,7 +347,14 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 	if err != nil {
 		return nil, err
 	}
-	defer t.Rollback()
+
+	defer func() {
+		if err != nil && t != nil {
+			if rerr := t.Rollback(); rerr != nil {
+				log.G(ctx).WithError(rerr).Warn("failed to rollback transaction")
+			}
+		}
+	}()
 
 	newSnapshot, err := storage.CreateSnapshot(ctx, kind, key, parent, opts...)
 	if err != nil {
@@ -318,47 +363,43 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 
 	if kind == snapshots.KindActive {
 		log.G(ctx).Debug("createSnapshot active")
-		// Create the new snapshot dir
-		snDir := s.getSnapshotDir(newSnapshot.ID)
-		if err := os.MkdirAll(snDir, 0700); err != nil {
-			return nil, err
-		}
 
+		// Apply the labels and other opts passed in against the snapshotter.
 		var snapshotInfo snapshots.Info
 		for _, o := range opts {
 			o(&snapshotInfo)
 		}
+		snapshotInfo.Name = key
+		// Get snapshot directory path
+		snDir := s.getSnapshotDir(newSnapshot.ID)
 
-		var sizeGB int
-		if sizeGBstr, ok := snapshotInfo.Labels[rootfsSizeLabel]; ok {
-			i64, _ := strconv.ParseInt(sizeGBstr, 10, 32)
-			sizeGB = int(i64)
-		}
-
-		var scratchLocation string
-		scratchLocation, _ = snapshotInfo.Labels[rootfsLocLabel]
-
-		scratchSource, err := s.openOrCreateScratch(ctx, sizeGB, scratchLocation)
-		if err != nil {
+		// Create the snapshot directory
+		if err := os.MkdirAll(snDir, 0700); err != nil {
 			return nil, err
 		}
-		defer scratchSource.Close()
 
-		// TODO: JTERRY75 - This has to be called sandbox.vhdx for the time
-		// being but it really is the scratch.vhdx Using this naming convention
-		// for now but this is not the kubernetes sandbox.
+		// IO/disk space optimization
 		//
-		// Create the sandbox.vhdx for this snapshot from the cache.
-		destPath := filepath.Join(snDir, "sandbox.vhdx")
-		dest, err := os.OpenFile(destPath, os.O_RDWR|os.O_CREATE, 0700)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to create sandbox.vhdx in snapshot")
-		}
-		defer dest.Close()
-		if _, err := io.Copy(dest, scratchSource); err != nil {
-			dest.Close()
-			os.Remove(destPath)
-			return nil, errors.Wrap(err, "failed to copy cached scratch.vhdx to sandbox.vhdx in snapshot")
+		// We only need one sandbox.vhd for the container. Skip making one for this
+		// snapshot if this isn't the snapshot that just houses the final sandbox.vhd
+		// that will be mounted as the containers scratch. Currently the key for a snapshot
+		// where a layer.vhd will be extracted to it will have the substring `extract-` in it.
+		// If this is changed this will also need to be changed.
+		//
+		// We save about 17MB per layer (if the default scratch vhd size of 20GB is used) and of
+		// course the time to copy which is fast but not as fast as not copying it at all.
+		if !strings.Contains(key, "extract-") {
+			// If we're going to be sharing the scratch of a different container start this setup.
+			shareScratch, ok := snapshotInfo.Labels[reuseScratchLabel]
+			if ok && shareScratch == "true" {
+				if err := handleScratchLabels(ctx, s, snapshotInfo, snDir); err != nil {
+					return nil, err
+				}
+			} else {
+				if err := handleCreateScratch(ctx, s, snDir, snapshotInfo.Labels); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 

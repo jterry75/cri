@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,6 +54,10 @@ import (
 // CreateContainer creates a new container in the given PodSandbox.
 func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateContainerRequest) (_ *runtime.CreateContainerResponse, retErr error) {
 	config := r.GetConfig()
+	if config.Annotations == nil {
+		config.Annotations = make(map[string]string)
+	}
+
 	log.G(ctx).Debugf("Container config %+v", config)
 	sandboxConfig := r.GetSandboxConfig()
 	sandbox, err := c.sandboxStore.Get(r.GetPodSandboxId())
@@ -171,6 +176,24 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 	}()
 
 	log.G(ctx).Debugf("Container %q spec: %#+v", id, spew.NewFormatter(spec))
+
+	// If the config field is specified, set the snapshotter label to reuse the pods
+	// scratch space. This only affects LCOW at the moment.
+	if rhcso.ShareScratch {
+		config.Annotations["containerd.io/snapshot/io.microsoft.container.storage.reuse-scratch"] = "true"
+		config.Annotations["containerd.io/snapshot/io.microsoft.container.storage.reuse-scratch.container-type"] = "container"
+		config.Annotations["containerd.io/snapshot/io.microsoft.sandbox.id"] = sandboxID
+	}
+
+	if rhcso.DefaultContainerScratchSizeInGb != 0 {
+		size := strconv.FormatInt(int64(rhcso.DefaultContainerScratchSizeInGb), 10)
+		config.Annotations["containerd.io/snapshot/io.microsoft.container.storage.rootfs.size-gb"] = size
+	}
+
+	if rhcso.DefaultVmScratchSizeInGb != 0 {
+		size := strconv.FormatInt(int64(rhcso.DefaultVmScratchSizeInGb), 10)
+		config.Annotations["containerd.io/snapshot/io.microsoft.vm.storage.rootfs.size-gb"] = size
+	}
 
 	snapshotterOpt := snapshots.WithLabels(config.Annotations)
 

@@ -19,6 +19,8 @@ limitations under the License.
 package server
 
 import (
+	"strconv"
+
 	runhcsoptions "github.com/Microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/options"
 	"github.com/containerd/containerd"
 	containerdio "github.com/containerd/containerd/cio"
@@ -170,6 +172,25 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 	log.G(ctx).Debugf("Sandbox container %q spec: %#+v", id, spew.NewFormatter(spec))
 
 	sandboxLabels := buildLabels(config.Labels, containerKindSandbox)
+
+	// If the config field is specified, set the snapshotter label to reuse the pods
+	// scratch space. This only affects LCOW at the moment.
+	if rhcso.ShareScratch {
+		config.Annotations["containerd.io/snapshot/io.microsoft.container.storage.reuse-scratch"] = "true"
+		config.Annotations["containerd.io/snapshot/io.microsoft.container.storage.reuse-scratch.container-type"] = "sandbox"
+		config.Annotations["containerd.io/snapshot/io.microsoft.sandbox.id"] = id
+	}
+
+	if rhcso.DefaultContainerScratchSizeInGb != 0 {
+		size := strconv.FormatInt(int64(rhcso.DefaultContainerScratchSizeInGb), 10)
+		config.Annotations["containerd.io/snapshot/io.microsoft.container.storage.rootfs.size-gb"] = size
+	}
+
+	if rhcso.DefaultVmScratchSizeInGb != 0 {
+		size := strconv.FormatInt(int64(rhcso.DefaultVmScratchSizeInGb), 10)
+		config.Annotations["containerd.io/snapshot/io.microsoft.vm.storage.rootfs.size-gb"] = size
+	}
+
 	snapshotterOpt := snapshots.WithLabels(config.Annotations)
 
 	opts := []containerd.NewContainerOpts{

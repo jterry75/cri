@@ -184,28 +184,35 @@ func (c *criService) loadContainer(ctx context.Context, cntr containerd.Containe
 	err = func() error {
 		// Load up-to-date status from containerd.
 		t, err := cntr.Task(ctx, func(fifos *containerdio.FIFOSet) (_ containerdio.IO, err error) {
-			stdoutWC, stderrWC, err := c.createContainerLoggers(meta.LogPath, meta.Config.GetTty())
-			if err != nil {
-				return nil, err
-			}
-			defer func() {
-				if err != nil {
-					if stdoutWC != nil {
-						stdoutWC.Close()
-					}
-					if stderrWC != nil {
-						stderrWC.Close()
-					}
-				}
-			}()
 			containerIO, err = cio.NewContainerIO(id,
+				meta.LogPath,
+				meta.Config.Labels,
 				cio.WithFIFOs(fifos),
 			)
 			if err != nil {
 				return nil, err
 			}
-			containerIO.AddOutput("log", stdoutWC, stderrWC)
-			containerIO.Pipe()
+
+			if containerIO.LoggerSchema == cio.SchemaFile {
+				stdoutWC, stderrWC, err := c.createContainerLoggers(meta.LogPath, meta.Config.GetTty())
+				if err != nil {
+					return nil, err
+				}
+				defer func() {
+					if err != nil {
+						if stdoutWC != nil {
+							stdoutWC.Close()
+						}
+						if stderrWC != nil {
+							stderrWC.Close()
+						}
+					}
+				}()
+
+				containerIO.AddOutput("log", stdoutWC, stderrWC)
+				containerIO.Pipe()
+			}
+
 			return containerIO, nil
 		})
 		if err != nil && !errdefs.IsNotFound(err) {
@@ -236,6 +243,8 @@ func (c *criService) loadContainer(ctx context.Context, cntr containerd.Containe
 				// containerd got restarted during that. In that case, we still
 				// treat the container as `CREATED`.
 				containerIO, err = cio.NewContainerIO(id,
+					meta.LogPath,
+					meta.Config.Labels,
 					cio.WithNewFIFOs(volatileContainerDir, meta.Config.GetTty(), meta.Config.GetStdin()),
 				)
 				if err != nil {

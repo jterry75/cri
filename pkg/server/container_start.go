@@ -83,13 +83,17 @@ func (c *criService) StartContainer(ctx context.Context, r *runtime.StartContain
 	}
 
 	ioCreation := func(id string) (_ containerdio.IO, err error) {
-		stdoutWC, stderrWC, err := c.createContainerLoggers(meta.LogPath, config.GetTty())
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to create container loggers")
+		if cntr.IO.LoggerSchema == cio.SchemaBinary {
+			return cntr.IO, nil
+		} else {
+			stdoutWC, stderrWC, err := c.createContainerLoggers(meta.LogPath, config.GetTty())
+			if err != nil {
+				return nil, errors.Wrap(err, "failed to create container loggers")
+			}
+			cntr.IO.AddOutput("log", stdoutWC, stderrWC)
+			cntr.IO.Pipe()
+			return cntr.IO, nil
 		}
-		cntr.IO.AddOutput("log", stdoutWC, stderrWC)
-		cntr.IO.Pipe()
-		return cntr.IO, nil
 	}
 
 	ctrInfo, err := container.Info(ctx)

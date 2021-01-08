@@ -18,7 +18,9 @@ package io
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -45,7 +47,15 @@ type ContainerIO struct {
 	stderrGroup *cioutil.WriterGroup
 
 	closer *wgCloser
+
+	LoggerSchema string
+	LoggerPath   string
 }
+
+const (
+	SchemaFile   = "file"
+	SchemaBinary = "binary"
+)
 
 var _ cio.IO = &ContainerIO{}
 
@@ -72,7 +82,7 @@ func WithNewFIFOs(root string, tty, stdin bool) ContainerIOOpts {
 }
 
 // NewContainerIO creates container io.
-func NewContainerIO(id string, opts ...ContainerIOOpts) (_ *ContainerIO, err error) {
+func NewContainerIO(id string, logPath string, labels map[string]string, opts ...ContainerIOOpts) (_ *ContainerIO, err error) {
 	c := &ContainerIO{
 		id:          id,
 		stdoutGroup: cioutil.NewWriterGroup(),
@@ -86,13 +96,33 @@ func NewContainerIO(id string, opts ...ContainerIOOpts) (_ *ContainerIO, err err
 	if c.fifos == nil {
 		return nil, errors.New("fifos are not set")
 	}
+
+	c.checkLogPath(logPath)
+
 	// Create actual fifos.
-	stdio, closer, err := newStdioPipes(c.fifos)
-	if err != nil {
-		return nil, err
+	switch c.LoggerSchema {
+	case SchemaFile:
+		stdio, closer, err := newStdioPipes(c.fifos)
+		if err != nil {
+			return nil, err
+		}
+		c.stdioPipes = stdio
+		c.closer = closer
+
+		break
+	case SchemaBinary:
+		closer, err := newBinaryLogger(id, c.fifos, c.LoggerPath, labels)
+		if err != nil {
+			return nil, err
+		}
+
+		c.closer = closer
+
+		break
+	default:
+		return nil, errors.New(fmt.Sprintf("unknown scheme %s \n", c.LoggerSchema))
 	}
-	c.stdioPipes = stdio
-	c.closer = closer
+
 	return c, nil
 }
 
@@ -216,19 +246,38 @@ func (c *ContainerIO) AddOutput(name string, stdout, stderr io.WriteCloser) (io.
 
 // Cancel cancels container io.
 func (c *ContainerIO) Cancel() {
-	c.closer.Cancel()
+	if c.closer != nil {
+		c.closer.Cancel()
+	}
 }
 
 // Wait waits container io to finish.
 func (c *ContainerIO) Wait() {
-	c.closer.Wait()
+	if c.closer != nil {
+		c.closer.Wait()
+	}
 }
 
 // Close closes all FIFOs.
 func (c *ContainerIO) Close() error {
-	c.closer.Close()
+	if c.closer != nil {
+		c.closer.Close()
+	}
+
 	if c.fifos != nil {
 		return c.fifos.Close()
 	}
 	return nil
+}
+
+func (c *ContainerIO) checkLogPath(logPath string) {
+	u, err := url.Parse(logPath)
+	if err != nil || u.Scheme == "" {
+		c.LoggerSchema = "file"
+		c.LoggerPath = logPath
+		return
+	}
+
+	c.LoggerSchema = u.Scheme
+	c.LoggerPath = u.Opaque
 }

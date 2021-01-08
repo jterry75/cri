@@ -19,9 +19,15 @@ limitations under the License.
 package io
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
+	"os"
+	"os/exec"
 	"sync"
+	"time"
 
 	winio "github.com/Microsoft/go-winio"
 	"github.com/containerd/containerd/cio"
@@ -29,6 +35,9 @@ import (
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 )
+
+const binaryIOProcStartTimeout = 10 * time.Second
+const binaryIOProcTermTimeout = 10 * time.Second // Give logger process solid 10 seconds for cleanup
 
 type delayedConnection struct {
 	l    net.Listener
@@ -177,4 +186,111 @@ func newStdioPipes(fifos *cio.FIFOSet) (_ *stdioPipes, _ *wgCloser, err error) {
 		ctx:    ctx,
 		cancel: cancel,
 	}, nil
+}
+
+type binaryCloser struct {
+	cmd            *exec.Cmd
+	signalFileName string
+}
+
+func (this *binaryCloser) Close() error {
+	if this.cmd == nil || this.cmd.Process == nil {
+		return nil
+	}
+
+	os.Remove(this.signalFileName)
+
+	done := make(chan error, 1)
+	defer close(done)
+
+	go func() {
+		done <- this.cmd.Wait()
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(binaryIOProcTermTimeout):
+		log.L.Warn("failed to wait for customer logger process to exit, killing")
+
+		err := this.cmd.Process.Kill()
+		if err != nil {
+			return errors.Wrap(err, "failed to kill customer logger process")
+		}
+
+		return nil
+	}
+}
+
+func newBinaryLogger(id string, fifos *cio.FIFOSet, binaryPath string, labels map[string]string) (_ *wgCloser, err error) {
+	var (
+		set         []io.Closer
+		ctx, cancel = context.WithCancel(context.Background())
+	)
+
+	started := make(chan bool)
+	defer close(started)
+
+	defer func() {
+		if err != nil {
+			for _, f := range set {
+				f.Close()
+			}
+			cancel()
+		}
+	}()
+
+	signalFileName, err := getSignalFileName(id)
+	if err != nil {
+		log.L.WithError(err).Errorf("failed to create tempory signal file %s", signalFileName)
+		return nil, err
+	}
+
+	labelData, err := json.Marshal(labels)
+	if err != nil {
+		log.L.WithError(err).Errorf("failed to serialize labels")
+		return
+	}
+
+	labelStr := string(labelData)
+	cmd := exec.Command(binaryPath, fifos.Stdout, fifos.Stderr, signalFileName, id, labelStr)
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	go func() {
+		for start := time.Now(); time.Now().Sub(start) < binaryIOProcStartTimeout; {
+			if _, err := os.Stat(signalFileName); os.IsNotExist(err) {
+				time.Sleep(time.Second / 2)
+			} else {
+				started <- true
+				return
+			}
+		}
+		started <- false
+	}()
+
+	// Wait until the logger started
+	if !<-started {
+		log.L.WithError(err).Errorf("failed to create signal file %s", signalFileName)
+		return nil, err
+	}
+
+	set = append(set, &binaryCloser{
+		cmd:            cmd,
+		signalFileName: signalFileName,
+	})
+
+	return &wgCloser{
+		wg:     &sync.WaitGroup{},
+		set:    set,
+		ctx:    ctx,
+		cancel: cancel,
+	}, nil
+}
+
+func getSignalFileName(id string) (string, error) {
+	tempdir, err := ioutil.TempDir("", id)
+	return fmt.Sprintf("%s\\logsignal-%s", tempdir, id), err
 }

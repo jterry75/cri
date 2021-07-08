@@ -99,6 +99,9 @@ type criService struct {
 	// initialized indicates whether the server is initialized. All GRPC services
 	// should return error before the server is initialized.
 	initialized atomic.Bool
+	// imagesInProgress represents any images currently being pulled. This can be used to deduplicate
+	// pulls of the same image to save work.
+	imagesInProgress *inProgress
 }
 
 // NewCRIService returns a new instance of CRIService
